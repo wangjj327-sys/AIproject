@@ -1,0 +1,898 @@
+================================================================================
+        游戏A - LLM决策代理系统 · 详细项目大纲
+================================================================================
+
+版本: v1.0
+日期: 2026-06-07
+
+================================================================================
+目录
+================================================================================
+
+  1. 项目概述
+  2. 游戏规则精确定义
+  3. 项目目录结构
+  4. 核心模块详细设计
+     4.1 游戏引擎模块 (game_engine)
+     4.2 玩家代理模块 (agents)
+     4.3 对战调度模块 (arena)
+     4.4 LLM服务模块 (llm_service)
+     4.5 用户界面模块 (ui)
+     4.6 评估分析模块 (evaluation)
+  5. 数据流设计
+  6. API接口设计
+  7. 提示工程策略
+  8. 配置文件设计
+  9. 测试策略
+  10. 分阶段实施计划
+  11. 评估指标体系
+  12. 技术选型详情
+  13. 潜在风险与应对
+  14. 附录
+
+================================================================================
+1. 项目概述
+================================================================================
+
+  1.1 项目名称
+      GameA-LLM: 基于大语言模型的双人不完全信息博弈决策系统
+
+  1.2 项目目标
+      - 构建游戏A的完整游戏引擎，精确实现规则
+      - 设计LLM驱动的智能代理，具备策略推理能力
+      - 支持多种对战模式：人机、机机、批量
+      - 提供可扩展的代理接口，便于接入不同LLM
+      - 建立科学的评估体系，量化代理表现
+
+  1.3 核心挑战
+      - 不完全信息：每个玩家只知道自己的5x5网格布局
+      - 策略深度：需要平衡进攻（完成自己的线）与防守（阻断对手）
+      - 对手建模：从对手的报数行为推断其可能的网格布局
+      - LLM推理：让LLM理解二维网格的空间关系并做出最优决策
+
+================================================================================
+2. 游戏规则精确定义
+================================================================================
+
+  2.1 初始设置
+      - 每位玩家拥有一个独立的 5x5 网格
+      - 网格中随机填入 1 到 25 这 25 个正整数，每个数字恰好出现一次
+      - 双方网格布局相互独立（不同随机排列）
+
+  2.2 游戏流程
+      1) 随机决定先手玩家（Player 1 或 Player 2）
+      2) 当前玩家从 1-25 中选择一个未被报过的数字，"报出"该数字
+      3) 双方都在自己的网格中检查是否有该数字，有则将其标记为"已打叉"
+      4) 双方各自重新计算已完成的"线"数
+      5) 如果任一玩家完成 ≥5 条线，游戏立即结束，该玩家获胜
+      6) 若双方同时达到 ≥5 条线，线数多者胜；线数相同则先手胜
+      7) 若无人获胜，切换到对方回合，回到步骤 2
+
+  2.3 "线"的定义（共12条）
+      行: Row 1, Row 2, Row 3, Row 4, Row 5        (5条)
+      列: Col 1, Col 2, Col 3, Col 4, Col 5        (5条)
+      对角线: 主对角线(左上-右下), 副对角线(右上-左下)(2条)
+      一条线被"完成"当且仅当该线上5个数字全部被标记
+
+  2.4 信息可见性
+      对自己可见:
+        - 完整的 5x5 网格及每个格子的数字
+        - 每个格子的标记状态（已打叉/未打叉）
+        - 自己当前已完成的线数
+        - 每条线还缺几个数字即可完成
+
+      对双方可见（公共信息）:
+        - 已报数字的完整序列（按时间顺序）
+        - 对手当前已完成的线数
+        - 当前轮到谁的回合
+
+      不可见:
+        - 对手的网格布局
+        - 对手网格中哪些位置已被标记
+        - 对手各条线的完成进度
+
+================================================================================
+3. 项目目录结构
+================================================================================
+
+  game_a_llm/
+  │
+  ├── README.md                    # 项目说明文档
+  ├── requirements.txt             # Python依赖列表
+  ├── pyproject.toml               # 项目元数据与构建配置
+  ├── .env.example                 # 环境变量模板
+  ├── .gitignore                   # Git忽略规则
+  │
+  ├── config/                      # 配置文件目录
+  │   ├── default.yaml             #   默认配置（模型、参数等）
+  │   ├── agents/                  #   代理配置文件
+  │   │   ├── aggressive.yaml      #     激进型代理
+  │   │   ├── defensive.yaml       #     防守型代理
+  │   │   ├── balanced.yaml        #     均衡型代理
+  │   │   └── random_baseline.yaml #     随机基准代理
+  │   └── prompts/                 #   提示词模板
+  │       ├── system_base.txt      #     基础系统提示
+  │       ├── system_cot.txt       #     带思维链的系统提示
+  │       └── user_observation.txt #     用户观测格式化模板
+  │
+  ├── src/                         # 源代码目录
+  │   ├── __init__.py
+  │   │
+  │   ├── engine/                  # 游戏引擎模块
+  │   │   ├── __init__.py
+  │   │   ├── board.py             #   棋盘/网格数据结构
+  │   │   ├── game_state.py        #   游戏状态管理
+  │   │   ├── rules.py             #   规则判定（线检测、胜负判定）
+  │   │   └── exceptions.py        #   自定义异常
+  │   │
+  │   ├── agents/                  # 玩家代理模块
+  │   │   ├── __init__.py
+  │   │   ├── base.py              #   代理抽象基类
+  │   │   ├── human.py             #   人类玩家（CLI输入）
+  │   │   ├── random.py            #   随机代理（基准）
+  │   │   ├── greedy.py            #   贪心代理（启发式基准）
+  │   │   ├── llm_agent.py         #   LLM代理（核心）
+  │   │   └── agent_factory.py     #   代理工厂（从配置创建）
+  │   │
+  │   ├── llm/                     # LLM服务模块
+  │   │   ├── __init__.py
+  │   │   ├── client.py            #   LLM API客户端抽象
+  │   │   ├── openai_client.py     #   OpenAI适配器
+  │   │   ├── anthropic_client.py  #   Anthropic适配器
+  │   │   ├── local_client.py      #   本地模型适配器（Ollama等）
+  │   │   ├── response_parser.py   #   响应解析与校验
+  │   │   └── token_counter.py     #   Token用量统计
+  │   │
+  │   ├── arena/                   # 对战调度模块
+  │   │   ├── __init__.py
+  │   │   ├── match.py             #   单局对战管理
+  │   │   ├── tournament.py        #   锦标赛/批量对战
+  │   │   ├── scheduler.py         #   对战调度器
+  │   │   └── recorder.py          #   对局记录器（日志/JSON）
+  │   │
+  │   ├── ui/                      # 用户界面模块（可选）
+  │   │   ├── __init__.py
+  │   │   ├── cli.py               #   命令行界面
+  │   │   ├── streamlit_app.py     #   Streamlit Web界面
+  │   │   └── renderer.py          #   棋盘可视化渲染
+  │   │
+  │   └── utils/                   # 工具模块
+  │       ├── __init__.py
+  │       ├── logger.py            #   日志配置
+  │       ├── config_loader.py     #   配置加载器
+  │       └── validators.py        #   通用数据校验
+  │
+  ├── tests/                       # 测试目录
+  │   ├── __init__.py
+  │   ├── conftest.py              #   Pytest fixtures
+  │   ├── test_board.py            #   棋盘单元测试
+  │   ├── test_game_state.py       #   游戏状态单元测试
+  │   ├── test_rules.py            #   规则判定单元测试
+  │   ├── test_agents.py           #   代理单元测试
+  │   ├── test_match.py            #   对战集成测试
+  │   ├── test_response_parser.py  #   响应解析测试
+  │   └── test_integration.py      #   端到端集成测试
+  │
+  ├── scripts/                     # 脚本目录
+  │   ├── run_match.py             #   运行单局对战
+  │   ├── run_tournament.py        #   运行批量锦标赛
+  │   ├── evaluate_results.py      #   分析对战结果
+  │   └── token_benchmark.py       #   Token消耗基准测试
+  │
+  ├── data/                        # 数据目录（运行时生成）
+  │   ├── logs/                    #   对战日志
+  │   ├── replays/                 #   对局回放（JSON）
+  │   └── results/                 #   评估结果
+  │
+  └── docs/                        # 文档目录
+      ├── PROJECT_OUTLINE.txt      #   本大纲文件
+      ├── GAME_RULES.md            #   游戏规则详细说明
+      ├── API_REFERENCE.md         #   API参考文档
+      └── EVALUATION_GUIDE.md      #   评估指南
+
+================================================================================
+4. 核心模块详细设计
+================================================================================
+
+  4.1 游戏引擎模块 (game_engine)
+
+    4.1.1 Board（棋盘类）
+          属性:
+            - grid: list[list[int]]       5x5矩阵，行优先
+            - marked: set[int]            已标记数字集合
+            - lines: dict[str, LineInfo]  12条线的状态字典
+
+          方法:
+            - __init__()                  随机生成1-25排列的5x5网格
+            - mark(number: int)           标记一个数字（双方同时）
+            - is_marked(number) -> bool   检查数字是否已被标记
+            - get_line_status(name)       获取指定线的完成状态
+            - recalculate_lines()         重新计算所有12条线
+            - get_incomplete_lines()      返回未完成线的信息列表
+            - get_completed_line_count()  已完成线数
+            - get_display_grid()          返回带标记状态的可显示网格
+            - to_dict() / from_dict()     序列化/反序列化
+
+    4.1.2 GameState（游戏状态类）
+          属性:
+            - boards: dict[str, Board]    双方棋盘 {player_1, player_2}
+            - called_numbers: list[int]   已报数字序列
+            - current_player: str         当前回合玩家ID
+            - phase: str                  游戏阶段 "init"|"playing"|"finished"
+            - winner: str | None          胜者ID
+            - turn_count: int             当前回合数
+            - move_history: list[Move]    完整行动历史
+
+          方法:
+            - reset()                        初始化新游戏
+            - step(player_id, number) -> StepResult  执行一个回合
+            - get_observation(player_id) -> Observation  获取玩家观测
+            - get_public_state() -> PublicState  获取公共状态
+            - is_terminal() -> bool           是否已结束
+            - get_winner() -> str | None      获取胜者
+            - to_dict() / from_dict()         序列化
+
+    4.1.3 Rules（规则引擎）
+          常量:
+            - LINES = [...]                  12条线的坐标定义
+            - BOARD_SIZE = 5
+            - WIN_THRESHOLD = 5              获胜需要5条线
+            - VALID_NUMBERS = set(1..25)
+
+          方法:
+            - check_line(board, line_coords) -> bool     检查一条线是否完成
+            - count_lines(board) -> int                  计算已完成线数
+            - is_valid_number(number, called) -> bool    验证数字合法性
+            - determine_winner(board1, board2) -> str    判定胜负
+            - get_line_detail(board, line_coords) -> dict 线详情（缺几个，缺哪几个）
+
+    4.1.4 数据类定义
+          @dataclass LineInfo:
+            name: str              如 "row_0", "col_2", "diag_main"
+            coords: list[tuple]    坐标列表 [(0,0),(0,1),...]
+            marked_count: int      已标记格数
+            total: int             总格数(总是5)
+            is_complete: bool      是否已完成
+
+          @dataclass Move:
+            player_id: str
+            number: int
+            timestamp: float
+
+          @dataclass StepResult:
+            move: Move
+            lines_gained_p1: int    P1本轮新增的线数
+            lines_gained_p2: int    P2本轮新增的线数
+            is_terminal: bool
+            winner: str | None
+            next_player: str | None
+
+          @dataclass Observation:
+            my_board: Board        自己的完整棋盘
+            my_lines: int          自己的已完成线数
+            opponent_lines: int    对手的已完成线数
+            called_numbers: list   已报数字序列
+            current_player: str
+            turn_count: int
+            line_details: list     自己各条线的详情
+
+          @dataclass PublicState:
+            called_numbers: list
+            p1_lines: int
+            p2_lines: int
+            current_player: str
+            turn_count: int
+            total_numbers_left: int
+
+  ----------------------------------------------------------------------
+
+  4.2 玩家代理模块 (agents)
+
+    4.2.1 BaseAgent（抽象基类）
+          方法:
+            - decide(observation, public_state) -> int    核心决策方法
+            - reset()                                     重置代理状态
+            - get_name() -> str                           代理名称
+            - get_type() -> str                           代理类型
+
+    4.2.2 HumanAgent（人类玩家）
+            - 通过CLI提示用户输入数字
+            - 输入校验：范围1-25，未被报过
+            - 显示当前棋盘状态和可选数字
+
+    4.2.3 RandomAgent（随机基准）
+            - 从剩余合法数字中均匀随机选择
+            - 用于评估LLM是否优于随机
+
+    4.2.4 GreedyAgent（贪心启发式基准）
+            - 优先选择能让自己完成一条线的数字
+            - 若无能完成线的数字，选择最接近完成线的缺失数字
+            - 不考虑对手状态
+
+    4.2.5 LLMAgent（LLM代理 - 核心）
+          属性:
+            - player_id: str
+            - model_name: str           使用的LLM模型
+            - persona: str              人格描述
+            - system_prompt: str        系统提示词
+            - history: list[dict]       对话历史
+            - llm_client: LLMClient     LLM客户端实例
+            - temperature: float        模型温度参数
+            - max_retries: int          解析失败重试次数
+
+          方法:
+            - decide(observation, public_state) -> int
+              1. 格式化当前状态为自然语言提示
+              2. 调用LLM获取决策
+              3. 解析响应中的数字
+              4. 校验合法性
+              5. 失败则重试或降级为随机选择
+
+            - _build_context(observation, public_state) -> str
+              将游戏状态转换为LLM可理解的文本
+
+            - _format_board_grid(board) -> str
+              将5x5网格格式化为文本表格
+
+            - _format_line_summary(board) -> str
+              总结各条线的完成进度
+
+            - _parse_response(response) -> dict
+              解析JSON响应，提取number和reasoning
+
+            - _validate_decision(number, called_numbers) -> bool
+              验证决策合法性
+
+    4.2.6 AgentFactory（代理工厂）
+            - create_agent(config_path) -> BaseAgent
+            - create_from_yaml(yaml_path)
+            - list_available_profiles() -> list[str]
+
+  ----------------------------------------------------------------------
+
+  4.3 对战调度模块 (arena)
+
+    4.3.1 Match（单局对战管理）
+          方法:
+            - __init__(game, agent1, agent2)
+            - run() -> MatchResult     运行一整局到结束
+            - run_step()                运行单步
+            - get_current_state()       当前状态快照
+
+          @dataclass MatchResult:
+            match_id: str
+            agent1_name: str
+            agent2_name: str
+            agent1_type: str
+            agent2_type: str
+            winner: str                # "agent1" | "agent2" | "draw"
+            total_turns: int
+            called_numbers: list
+            final_state: dict          包含双方最终棋盘
+            move_timeline: list        每步的详细信息
+            duration_seconds: float
+            token_usage: dict          每方消耗的token
+
+    4.3.2 Tournament（锦标赛/批量对战）
+          方法:
+            - __init__(config)          锦标赛配置
+            - add_agent_pair(a1, a2)    添加对战组合
+            - run(n_games)              运行n局
+            - run_round_robin(agents)   循环赛（每个组合互相对战）
+            - get_results() -> list[MatchResult]
+            - save_results(path)
+
+    4.3.3 Recorder（对局记录器）
+          方法:
+            - record_step(game_state, move, agent_decision)
+            - save_replay(path)           保存完整回放
+            - load_replay(path) -> Match
+            - export_json() -> dict
+
+  ----------------------------------------------------------------------
+
+  4.4 LLM服务模块 (llm)
+
+    4.4.1 LLMClient（抽象基类）
+          方法:
+            - chat(messages, **kwargs) -> str          发送对话请求
+            - chat_with_schema(messages, schema) -> dict  结构化输出
+            - count_tokens(text) -> int
+
+    4.4.2 OpenAIClient（OpenAI适配器）
+            - 支持模型: gpt-4o, gpt-4o-mini, o4-mini 等
+            - 使用 JSON Mode 或 Function Calling 保证结构化输出
+            - 支持流式输出（可选）
+
+    4.4.3 AnthropicClient（Anthropic适配器）
+            - 支持模型: Claude Opus 4.8, Sonnet 4.6, Haiku 4.5 等
+            - 使用 Tool Use 实现结构化输出
+            - 注意: 需要适当处理thinking模式
+
+    4.4.4 LocalClient（本地模型适配器）
+            - 通过 Ollama / vLLM 等兼容接口调用
+            - 支持模型: Qwen, LLaMA, DeepSeek 等开源模型
+
+    4.4.5 ResponseParser（响应解析器）
+          方法:
+            - parse_json(text) -> dict        从文本中提取JSON
+            - extract_number(data) -> int     从解析数据提取数字
+            - validate_range(n) -> bool       验证范围
+            - validate_not_called(n, called)  验证未被报过
+
+    4.4.6 TokenCounter（Token统计）
+            - 记录每局的 prompt/completion token 用量
+            - 按模型计算成本
+            - 生成用量报告
+
+  ----------------------------------------------------------------------
+
+  4.5 用户界面模块 (ui)
+
+    4.5.1 CLI（命令行界面）
+            命令:
+              game-a play --p1 human --p2 llm --profile aggressive
+              game-a watch --p1 llm-gpt4o --p2 llm-claude
+              game-a tournament --agents gpt4o claude qwen --games 50
+
+    4.5.2 Streamlit Web界面（可选阶段实现）
+            页面布局:
+              左侧: 自己的5x5网格（彩色显示，已标记的用红叉标识）
+              右侧: 游戏信息面板
+                - 已报数字时间线
+                - 双方线数对比（进度条）
+                - 自己的各线完成进度
+              底部: 数字选择面板（1-25按钮，已报的灰色不可选）
+              顶部: 游戏状态栏（当前回合、提示信息）
+
+    4.5.3 BoardRenderer（棋盘渲染）
+            方法:
+              - render_text(board) -> str          ASCII文本渲染
+              - render_rich(board) -> str          Rich库彩色渲染
+              - render_html(board) -> str          HTML/CSS渲染（供Streamlit使用）
+
+  ----------------------------------------------------------------------
+
+  4.6 评估分析模块 (evaluation)
+
+    4.6.1 指标体系
+            - 胜率 (Win Rate)
+            - 平均回合数 (Average Turns)
+            - 先手优势 (First-move Advantage)
+            - 非法行动率 (Illegal Action Rate)
+            - 重试率 (Retry Rate)
+            - 每局Token消耗 (Tokens per Game)
+            - 每局成本 (Cost per Game)
+            - 推理质量评分 (Reasoning Quality Score) - 人工评估
+
+    4.6.2 分析方法
+            - 对战结果统计分析
+            - ELO评分计算
+            - 行动序列分析（寻找策略模式）
+            - 模型间横向对比
+            - 提示词消融实验
+
+================================================================================
+5. 数据流设计
+================================================================================
+
+  5.1 单回合数据流
+
+    ┌──────────┐   观测请求    ┌──────────┐
+    │          │──────────────→│          │
+    │  游戏引擎 │              │ 当前玩家  │
+    │          │←──────────────│  (代理)   │
+    │ GameState│   返回数字    │          │
+    └────┬─────┘              └──────────┘
+         │
+         │ 更新双方棋盘
+         │
+    ┌────▼─────────────────────────┐
+    │  双方各自标记数字             │
+    │  重新计算线数                 │
+    │  判定胜负 / 切换回合          │
+    └──────────────────────────────┘
+
+  5.2 LLM代理决策数据流
+
+    Observation ──→ _build_context() ──→ 格式化文本 ──→ LLM API
+                                                              │
+    Decision ←── _validate() ←── _parse_response() ←── JSON Response
+
+  5.3 批量对战数据流
+
+    Tournament Config
+         │
+         ▼
+    ┌─────────────┐     ┌──────────┐     ┌──────────────┐
+    │ Scheduler    │────→│ Match 1  │────→│ Recorder     │
+    │ (并行调度)    │────→│ Match 2  │────→│ (记录每局)    │
+    │              │────→│ Match N  │────→│              │
+    └─────────────┘     └──────────┘     └──────┬───────┘
+                                                 │
+                                          ┌──────▼───────┐
+                                          │ Evaluator    │
+                                          │ (统计分析)    │
+                                          └──────────────┘
+
+================================================================================
+6. API接口设计
+================================================================================
+
+  6.1 游戏引擎API
+
+    # 创建游戏
+    game = GameA()
+    game.reset()
+
+    # 获取观测
+    obs = game.get_observation("player_1")
+    # obs.my_board, obs.my_lines, obs.opponent_lines, obs.called_numbers, ...
+
+    # 获取公共状态
+    pub = game.get_public_state()
+    # pub.called_numbers, pub.p1_lines, pub.p2_lines, pub.current_player
+
+    # 执行行动
+    result = game.step("player_1", number=7)
+    # result.is_terminal, result.winner, result.lines_gained_p1, ...
+
+    # 检查状态
+    game.is_terminal()      # bool
+    game.get_winner()       # str | None
+    game.turn_count         # int
+    game.current_player     # str
+
+  6.2 代理API
+
+    agent = LLMAgent(
+        player_id="player_1",
+        model="gpt-4o",
+        persona="冷静策略家",
+        config_path="config/agents/balanced.yaml"
+    )
+    number, reasoning = agent.decide(observation, public_state)
+
+  6.3 对战API
+
+    # 单局对战
+    match = Match(game, agent1, agent2)
+    result = match.run()
+    print(f"Winner: {result.winner}, Turns: {result.total_turns}")
+
+    # 锦标赛
+    tournament = Tournament(config)
+    tournament.add_agent_pair(agent_a, agent_b)
+    results = tournament.run(n_games=100)
+    tournament.save_results("data/results/tournament_001.json")
+
+================================================================================
+7. 提示工程策略
+================================================================================
+
+  7.1 系统提示词设计层次
+
+    第一层：角色设定
+      "你是一名精英级的策略游戏玩家，擅长数学推理和博弈论。你的
+       目标是赢得游戏A——一个双人竞速连线游戏。"
+
+    第二层：规则说明
+      详细描述游戏规则，强调：
+      - 你的网格是保密的，对手看不到
+      - 你只能看到对手完成了多少条线，但不知道对手哪些线完成了
+      - 你不知道对手的网格布局
+
+    第三层：策略指导
+      "请按以下步骤思考：
+       1. 分析自己哪些线接近完成
+       2. 评估哪些数字能最大化自己的进度
+       3. 从对手报数模式中推断对手可能的策略
+       4. 考虑是否需要阻断对手可能即将完成的线
+       5. 做出最终决策"
+
+    第四层：输出格式
+      "你必须严格返回以下JSON格式：
+       {"number": int, "reasoning": string}
+       其中number必须是1-25之间未被报过的整数。"
+
+  7.2 观测信息格式化模板
+
+    --- 你的棋盘 (5x5) ---
+    [根据标记状态用不同符号显示]
+    已标记: ✗, 未标记: 数字本身
+
+    示例：
+    ┌────┬────┬────┬────┬────┐
+    │ ✗  │ 10 │ 15 │ ✗  │ 25 │  行0: 缺2个 (15, 10)
+    ├────┼────┼────┼────┼────┤
+    │ 2  │ ✗  │ 14 │ 19 │ ✗  │  行1: 缺3个 (2, 14, 19)
+    ├────┼────┼────┼────┼────┤
+    │ 3  │ 8  │ ✗  │ 18 │ 23 │  行2: 缺4个
+    ├────┼────┼────┼────┼────┤
+    │ 4  │ 7  │ 12 │ ✗  │ 22 │  行3: 缺4个
+    ├────┼────┼────┼────┼────┤
+    │ ✗  │ 6  │ 11 │ 16 │ ✗  │  行4: 缺3个
+    └────┴────┴────┴────┴────┘
+
+    线进度摘要:
+      行: [2/5] [2/5] [1/5] [1/5] [2/5]
+      列: [2/5] [1/5] [1/5] [2/5] [2/5]
+      对角线: 主[2/5] 副[1/5]
+      已完成线: 2条
+      总进度: 2/12 线
+
+    --- 公共信息 ---
+    已报数字序列: [3, 15, 21, 7, 12, ...]
+    对手已完成线数: 1
+    剩余可选数字: [1, 2, 4, 5, 6, ...]
+    当前回合: 你的回合 (第8回合)
+
+  7.3 提示词迭代优化策略
+      - A/B测试：对比有/无推理步骤的效果
+      - 消融实验：测试不同策略指导的贡献
+      - 对手建模提示：是否加入"猜测对手布局"的提示
+      - 历史信息窗口：保留最近N轮的推理历史
+      - 紧急状态提示：对手接近胜利时的特殊策略提示
+
+================================================================================
+8. 配置文件设计
+================================================================================
+
+  8.1 主配置 (config/default.yaml)
+      ```yaml
+      game:
+        board_size: 5
+        win_threshold: 5
+        max_turns: 50          # 防止无限循环
+
+      llm:
+        provider: openai       # openai | anthropic | local
+        model: gpt-4o
+        temperature: 0.7
+        max_tokens: 500
+        timeout: 30
+
+      agent:
+        system_prompt_version: v2
+        history_window: 10     # 保留最近N轮历史
+        max_retries: 2         # 响应解析最大重试次数
+
+      arena:
+        parallel_games: 4      # 并行对局数
+        save_replays: true
+        log_level: INFO
+
+      logging:
+        level: INFO
+        format: "%(asctime)s [%(levelname)s] %(message)s"
+        file: data/logs/game_a.log
+      ```
+
+  8.2 代理配置示例 (config/agents/aggressive.yaml)
+      ```yaml
+      name: aggressive
+      persona: "你是一个激进的策略玩家，总是优先快速完成自己的线，
+                喜欢冒险而非防守。你相信最好的防守就是进攻。"
+      temperature: 0.9
+      strategy_hints:
+        - "优先选择能立即完成一条线的数字"
+        - "如果能完成多条线，选择该数字"
+        - "不太关注对手的进度"
+      ```
+
+================================================================================
+9. 测试策略
+================================================================================
+
+  9.1 单元测试 (tests/)
+      - test_board.py:         棋盘初始化、标记、序列化
+      - test_game_state.py:    状态转换、step逻辑
+      - test_rules.py:         线检测正确性（所有12条线）
+                              - 单线完成
+                              - 多线同时完成（一个数字完成多条线）
+                              - 边界情况（0条线、12条线全满）
+                              - 胜负判定（同时>=5线的处理）
+      - test_response_parser.py: JSON解析、数字提取、异常处理
+      - test_agents.py:        各类代理的基本行为
+
+  9.2 集成测试
+      - test_match.py:         完整一局流程
+                              - 随机 vs 随机：100局无异常
+                              - 贪心 vs 随机：贪心应显著优于随机
+                              - 回合数应在合理范围内（5-50）
+      - test_integration.py:   端到端测试
+
+  9.3 测试覆盖率目标
+      - 引擎模块: ≥95%
+      - 代理模块: ≥80%
+      - 整体: ≥85%
+
+  9.4 基准对局测试
+      - 贪心 vs 随机: 100局，贪心胜率应 >80%
+      - LLM vs 随机: 10局（成本考虑），LLM胜率应 >90%
+      - LLM vs 贪心: 10局，LLM应有显著优势
+
+================================================================================
+10. 分阶段实施计划
+================================================================================
+
+  阶段1: 游戏引擎核心 (预计2-3天)
+  ─────────────────────────────────
+  任务:
+    □ 实现 Board 类（网格生成、标记、序列化）
+    □ 实现 GameState 类（状态管理、step逻辑）
+    □ 实现 Rules 模块（12条线的判定算法）
+    □ 实现基础异常类
+    □ 编写引擎单元测试（目标覆盖率95%+）
+    □ 编写命令行双人对战原型（验证引擎可用）
+
+  交付物:
+    - 可用的游戏引擎
+    - 两个人类通过CLI对战
+    - 所有单元测试通过
+
+  阶段2: 基准代理 (预计1-2天)
+  ─────────────────────────────────
+  任务:
+    □ 实现 BaseAgent 抽象类
+    □ 实现 RandomAgent
+    □ 实现 GreedyAgent（启发式策略）
+    □ 实现 HumanAgent（CLI交互）
+    □ 实现简单的单局对战器
+    □ 集成测试：随机vs贪心100局
+
+  交付物:
+    - 多个可用的基准代理
+    - 机器对战演示
+    - 基准胜率数据
+
+  阶段3: LLM代理接入 (预计3-5天)
+  ─────────────────────────────────
+  任务:
+    □ 实现 LLMClient 抽象层
+    □ 实现 OpenAI 适配器
+    □ 实现 Anthropic 适配器
+    □ 实现响应解析器（JSON提取+校验+重试）
+    □ 实现 LLMAgent 核心逻辑
+    □ 设计并实现系统提示词（多个版本）
+    □ 设计观测信息格式化模板
+    □ 人机对战测试（人类 vs LLM）
+
+  交付物:
+    - LLM能合法地玩游戏
+    - 人机对战可体验
+    - 决策reasoning可追踪
+
+  阶段4: 批量对战与评估 (预计2-3天)
+  ─────────────────────────────────
+  任务:
+    □ 完善 Match 类（含详细记录）
+    □ 实现 Tournament 类（批量对战）
+    □ 实现 Recorder（回放保存/加载）
+    □ 实现 Token 消耗统计
+    □ 编写评估脚本
+    □ 运行对比实验（不同模型/提示词）
+
+  交付物:
+    - 批量对战能力
+    - 评估报告
+    - 不同LLM的胜率对比数据
+
+  阶段5: 可视化与交互 (可选，预计3-5天)
+  ─────────────────────────────────
+  任务:
+    □ 实现 CLI 命令行工具（argparse）
+    □ 实现 BoardRenderer（多种渲染模式）
+    □ 实现 Streamlit Web 界面
+      □ 棋盘可视化组件
+      □ 数字选择交互
+      □ 实时状态更新
+      □ 对局历史面板
+
+  交付物:
+    - 一键启动Web界面
+    - 友好的游戏体验
+
+  阶段6: 进阶功能 (研究性)
+  ─────────────────────────────────
+  任务:
+    □ 对手建模模块（从报数序列推断对手布局）
+    □ MCTS + LLM混合决策
+    □ 自我对弈数据生成
+    □ 小模型微调实验
+    □ 向量记忆增强
+
+================================================================================
+11. 评估指标体系
+================================================================================
+
+  11.1 量化指标
+
+    | 指标名称           | 计算方法                        | 目标值    |
+    |--------------------|--------------------------------|-----------|
+    | 胜率               | 获胜局数 / 总局数               | >85%     |
+    | 先手胜率           | 先手时的胜率                    | 观察     |
+    | 后手胜率           | 后手时的胜率                    | 观察     |
+    | 非法行动率         | 返回非法数字的回合数 / 总回合数  | 0%       |
+    | 重试率             | 需要重试的回合数 / 总回合数      | <5%      |
+    | 平均回合数         | 所有对局的回合数均值             | 观察     |
+    | 平均决策时间       | 每次LLM调用的响应时间             | <5s      |
+    | Token/局           | 每局消耗的prompt+completion token | 观察    |
+    | 成本/局            | Token消耗折合的API成本            | 记录     |
+    | ELO评分            | 基于胜负关系的ELO计算             | 观察     |
+
+  11.2 定性指标
+      - 推理合理性：人工审核LLM的reasoning是否与网格状态一致
+      - 策略多样性：不同persona是否展现不同的游戏风格
+      - 策略深度：LLM是否展现进攻/防守/欺骗等高级行为
+
+================================================================================
+12. 技术选型详情
+================================================================================
+
+  | 层级     | 技术                    | 版本     | 用途                        |
+  |----------|------------------------|----------|-----------------------------|
+  | 语言     | Python                 | ≥3.11    | 主开发语言                    |
+  | 异步     | asyncio                | 标准库    | 异步LLM调用                  |
+  | HTTP     | httpx                  | ≥0.27    | LLM API HTTP客户端            |
+  | OpenAI   | openai                 | ≥1.0     | OpenAI SDK                   |
+  | Anthropic| anthropic              | ≥0.30    | Anthropic SDK                |
+  | 配置     | PyYAML / OmegaConf     | -        | YAML配置解析                  |
+  | 日志     | loguru                 | -        | 结构化日志                    |
+  | 测试     | pytest + pytest-cov    | -        | 测试框架+覆盖率               |
+  | 数据     | pydantic               | ≥2.0     | 数据校验与模型                 |
+  | 终端     | rich                   | -        | 彩色终端输出                  |
+  | Web UI   | streamlit              | ≥1.30    | Web界面（可选）               |
+  | 分析     | pandas + matplotlib    | -        | 数据分析与可视化               |
+  | 本地模型  | ollama                 | -        | 本地LLM运行（可选）            |
+
+================================================================================
+13. 潜在风险与应对
+================================================================================
+
+  | 风险                              | 概率 | 影响 | 应对措施                              |
+  |-----------------------------------|------|------|--------------------------------------|
+  | LLM不理解"隐私网格"概念            | 中   | 高   | 提示词反复强调；输出过滤检测是否泄露   |
+  | 输出格式不稳定（非JSON）           | 高   | 中   | JSON Mode + Function Calling + 重试   |
+  | LLM返回已被报过的数字              | 中   | 中   | 代码层强校验 + 带错误信息重试          |
+  | LLM决策质量差（不如随机）          | 低   | 高   | 多轮提示词迭代；使用更强模型           |
+  | API调用延迟导致体验差              | 中   | 低   | 异步调用；流式输出；超时处理           |
+  | 对角线判定错误                    | 低   | 高   | 代码精确计算（不依赖LLM）；单元测试覆盖 |
+  | Token消耗过大导致成本过高          | 中   | 中   | 压缩观测信息；使用摘要而非完整网格      |
+  | 不同模型API差异导致适配困难        | 中   | 中   | 统一的LLMClient抽象层                  |
+
+================================================================================
+14. 附录
+================================================================================
+
+  A. 12条线的坐标定义
+    行:  [(0,0)-(0,4)], [(1,0)-(1,4)], [(2,0)-(2,4)], [(3,0)-(3,4)], [(4,0)-(4,4)]
+    列:  [(0,0)-(4,0)], [(0,1)-(4,1)], [(0,2)-(4,2)], [(0,3)-(4,3)], [(0,4)-(4,4)]
+    对角: [(0,0)-(4,4)] (主对角线), [(0,4)-(4,0)] (副对角线)
+
+  B. 棋盘随机生成算法
+    1. 创建包含1-25的列表
+    2. 使用Fisher-Yates洗牌算法随机打乱
+    3. 按行优先填入5x5矩阵
+    4. 确保双方使用不同的随机种子
+
+  C. 线完成判定算法
+    def check_line(board, line_coords):
+        return all(board[r][c] in board.marked for r, c in line_coords)
+
+  D. 线增量更新算法（性能优化）
+    新标记一个数字后，只需检查包含该数字的线：
+    - 该数字所在的行（1条）
+    - 该数字所在的列（1条）
+    - 该数字所在的对角线（0-2条，取决于位置）
+    最多只需检查4条线，而非全部12条
+
+  E. 游戏理论分析
+    - 状态空间: 25! × 25! × 2^25 ≈ 天文数字（远超穷举）
+    - 信息集: 玩家只知道自己的网格和公共信息
+    - 这是一个非完美信息扩展式博弈
+    - 适合用LLM做启发式决策，而非搜索所有可能
+
+================================================================================
+                        大纲结束
+================================================================================
