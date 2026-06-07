@@ -12,8 +12,8 @@ import sys
 import os
 from pathlib import Path
 
-# 确保项目根目录在路径中
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# 确保 src 目录在路径中（使得 from engine... 等导入生效）
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 from engine.game_state import GameState, GamePhase
