@@ -262,9 +262,9 @@ class TestLLMAgent:
         pub = game.get_public_state()
         number, reasoning = agent.decide(obs, pub)
 
-        # 应该在所有重试失败后降级为随机合法数字
+        # 应该在所有重试失败后降级为贪心兜底
         assert number in obs.legal_numbers
-        assert "降级" in reasoning
+        assert "兜底" in reasoning
 
     def test_different_personas_load(self):
         """不同人格都能加载"""
@@ -353,7 +353,7 @@ class TestLLMAgent:
         assert len(last_messages) >= 2
         user_content = last_messages[-1]["content"]
         assert "棋盘" in user_content
-        assert "可选数字" in user_content
+        assert "推荐" in user_content
 
     def test_context_includes_public_info(self, game):
         """上下文包含公共信息"""
@@ -370,7 +370,7 @@ class TestLLMAgent:
 
         last_messages = mock.get_last_messages()
         user_content = last_messages[-1]["content"]
-        assert "已报数字" in user_content
+        assert "已报" in user_content
         assert "7" in user_content or "[7" in user_content
 
     def test_warning_when_opponent_close_to_win(self, game):
